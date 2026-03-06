@@ -1,0 +1,165 @@
+#!/bin/bash
+# ==============================================================================
+# Project: FRP TUI Multi-Instance Manager
+# Description: 基于 Whiptail 和 Systemd 模板机制的 FRP 服务端多实例图形化管理脚本
+# Author: 執筆·抒情 (GitHub: @NX2406)
+# Blog: https://wwy0510.top
+# ==============================================================================
+
+INSTALL_PATH="/usr/local/bin/frps"
+CONFIG_BASE_DIR="/etc/frp/instances"
+SYSTEMD_TEMPLATE="/etc/systemd/system/frps@.service"
+
+# 环境检查与依赖安装
+check_env() {
+    if [[ $EUID -ne 0 ]]; then
+        echo "Error: Please run this script as root."
+        exit 1
+    fi
+    # 检查并安装 whiptail
+    if ! command -v whiptail &> /dev/null; then
+        echo "Installing TUI dependencies (whiptail)..."
+        if command -v apt-get &> /dev/null; then apt-get update -y && apt-get install -y whiptail
+        elif command -v yum &> /dev/null; then yum install -y newt
+        else echo "Please install whiptail or newt manually!"; exit 1; fi
+    fi
+}
+
+# 核心初始化：拉取文件与部署 Systemd 模板
+init_env() {
+    if [[ ! -f "$INSTALL_PATH" ]]; then
+        whiptail --title "系统初始化" --infobox "首次运行，正在拉取最新的 FRP 核心文件，请稍候..." 8 60
+        FRP_VERSION=$(curl -s https://api.github.com/repos/fatedier/frp/releases/latest | grep '"tag_name":' | sed -E 's/.*"v([^"]+)".*/\1/')
+        ARCH=$(uname -m)
+        if [[ "$ARCH" == "x86_64" ]]; then FRP_ARCH="amd64"; elif [[ "$ARCH" == "aarch64" || "$ARCH" == "arm64" ]]; then FRP_ARCH="arm64"; else whiptail --msgbox "不支持的架构" 8 40; exit 1; fi
+        
+        wget -q -O /tmp/frp.tar.gz "https://github.com/fatedier/frp/releases/download/v${FRP_VERSION}/frp_${FRP_VERSION}_linux_${FRP_ARCH}.tar.gz"
+        tar -zxvf /tmp/frp.tar.gz -C /tmp/ > /dev/null
+        mv /tmp/frp_${FRP_VERSION}_linux_${FRP_ARCH}/frps ${INSTALL_PATH}
+        chmod +x ${INSTALL_PATH}
+        rm -rf /tmp/frp*
+    fi
+
+    mkdir -p ${CONFIG_BASE_DIR}
+    if [[ ! -f "$SYSTEMD_TEMPLATE" ]]; then
+        cat > ${SYSTEMD_TEMPLATE} <<EOF
+[Unit]
+Description=FRP Server Instance - %i
+After=network.target syslog.target
+
+[Service]
+Type=simple
+ExecStart=${INSTALL_PATH} -c ${CONFIG_BASE_DIR}/%i.toml
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload
+    fi
+}
+
+# 交互式创建实例向导
+create_instance() {
+    INST_NAME=$(whiptail --title "创建新网关实例" --inputbox "请输入实例名称 (仅限英文/数字，如 openwrt, web):" 10 60 3>&1 1>&2 2>&3)
+    if [[ -z "$INST_NAME" ]]; then return; fi
+    if [[ -f "${CONFIG_BASE_DIR}/${INST_NAME}.toml" ]]; then
+        whiptail --title "错误" --msgbox "实例 [${INST_NAME}] 已存在！" 8 40; return;
+    fi
+
+    BIND_PORT=$(whiptail --title "端口设置" --inputbox "请输入服务端监听端口 (bindPort, 默认 7000):" 10 60 "7000" 3>&1 1>&2 2>&3)
+    if [[ -z "$BIND_PORT" ]]; then return; fi
+
+    TOKEN=$(whiptail --title "安全验证" --passwordbox "请输入通信令牌 (auth.token):" 10 60 3>&1 1>&2 2>&3)
+    if [[ -z "$TOKEN" ]]; then return; fi
+
+    if whiptail --title "底层传输加密" --yesno "是否强制开启 TLS 加密？\n\n防 DPI 深度包检测嗅探 (推荐 Yes)" 10 60; then
+        TLS_ENABLE="true"
+    else
+        TLS_ENABLE="false"
+    fi
+
+    WEB_PORT=$(whiptail --title "仪表盘设置" --inputbox "请输入后台管理面板端口 (留空则不开启):" 10 60 "7500" 3>&1 1>&2 2>&3)
+
+    cat > "${CONFIG_BASE_DIR}/${INST_NAME}.toml" <<EOF
+bindPort = ${BIND_PORT}
+auth.method = "token"
+auth.token = "${TOKEN}"
+transport.tls.force = ${TLS_ENABLE}
+EOF
+
+    if [[ -n "$WEB_PORT" ]]; then
+        WEB_USER=$(whiptail --title "仪表盘安全" --inputbox "设置面板用户名:" 10 60 "admin" 3>&1 1>&2 2>&3)
+        WEB_PASS=$(whiptail --title "仪表盘安全" --passwordbox "设置面板密码:" 10 60 3>&1 1>&2 2>&3)
+        cat >> "${CONFIG_BASE_DIR}/${INST_NAME}.toml" <<EOF
+
+webServer.addr = "0.0.0.0"
+webServer.port = ${WEB_PORT}
+webServer.user = "${WEB_USER}"
+webServer.password = "${WEB_PASS}"
+EOF
+    fi
+
+    systemctl enable --now frps@${INST_NAME}
+    whiptail --title "部署成功" --msgbox "FRP 实例 [${INST_NAME}] 已成功创建并在后台运行！\n\n请在防火墙放行 TCP 端口：${BIND_PORT} ${WEB_PORT:+(及 $WEB_PORT)}" 10 65
+}
+
+# 实例管理菜单
+manage_instances() {
+    OPTIONS=()
+    for conf in ${CONFIG_BASE_DIR}/*.toml; do
+        if [[ -f "$conf" ]]; then
+            NAME=$(basename "$conf" .toml)
+            if [[ $(systemctl is-active frps@${NAME}) == "active" ]]; then STATE="[Running]"; else STATE="[Stopped]"; fi
+            OPTIONS+=("$NAME" "$STATE")
+        fi
+    done
+
+    if [ ${#OPTIONS[@]} -eq 0 ]; then
+        whiptail --title "提示" --msgbox "当前没有任何 FRP 实例，请先创建。" 8 40
+        return
+    fi
+
+    CHOICE=$(whiptail --title "实例管理中心" --menu "使用 ↑/↓ 选择实例，按回车确认:" 15 60 6 "${OPTIONS[@]}" 3>&1 1>&2 2>&3)
+    if [[ -z "$CHOICE" ]]; then return; fi
+
+    ACTION=$(whiptail --title "操作: $CHOICE" --menu "请选择要执行的操作:" 15 60 6 \
+        "1" "启动 (Start)" "2" "停止 (Stop)" "3" "重启 (Restart)" \
+        "4" "查看实时日志" "5" "删除此实例 (Delete)" 3>&1 1>&2 2>&3)
+
+    case "$ACTION" in
+        1) systemctl start frps@${CHOICE}; whiptail --msgbox "已启动" 8 30 ;;
+        2) systemctl stop frps@${CHOICE}; whiptail --msgbox "已停止" 8 30 ;;
+        3) systemctl restart frps@${CHOICE}; whiptail --msgbox "已重启" 8 30 ;;
+        4) clear; echo ">>> 正在查看 [${CHOICE}] 的日志，按 Ctrl+C 退出返回主菜单 <<<"; journalctl -u frps@${CHOICE} -f ;;
+        5) 
+            if whiptail --title "危险操作" --yesno "确定要彻底删除实例 [${CHOICE}] 及其配置吗？" 10 50; then
+                systemctl disable --now frps@${CHOICE} > /dev/null 2>&1
+                rm -f "${CONFIG_BASE_DIR}/${CHOICE}.toml"
+                whiptail --msgbox "实例已被彻底删除！" 8 30
+            fi
+            ;;
+    esac
+}
+
+# 启动主程序
+main_menu() {
+    check_env
+    init_env
+    while true; do
+        CHOICE=$(whiptail --title "FRP Gateway Multi-Manager (TUI)" --menu "请选择操作:" 15 60 4 \
+            "1" "➕ 创建新的 FRP 实例向导" \
+            "2" "⚙️  管理/查看已有实例" \
+            "0" "❌ 退出控制台" 3>&1 1>&2 2>&3)
+
+        case $CHOICE in
+            1) create_instance ;;
+            2) manage_instances ;;
+            0|"") clear; exit 0 ;;
+        esac
+    done
+}
+
+main_menu
