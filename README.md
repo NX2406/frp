@@ -17,4 +17,4 @@
 支持主流的 Linux 发行版 (Debian / Ubuntu / CentOS)，请确保在 **root** 用户下执行以下一键命令：
 
 ```bash
-wget -O frps_tui.sh [https://raw.githubusercontent.com/NX2406/frp/refs/heads/main/frps](https://raw.githubusercontent.com/NX2406/frp/refs/heads/main/frps) && chmod +x frps_tui.sh && ./frps_tui.sh
+wget -O frps_tui.sh "https://raw.githubusercontent.com/NX2406/frp/refs/heads/main/frps" && chmod +x frps_tui.sh && ./frps_tui.sh
