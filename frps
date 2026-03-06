@@ -83,12 +83,22 @@ create_instance() {
     read -p "3. 请输入通信令牌 (对应客户端的【令牌】，明文可见): " TOKEN
     if [[ -z "$TOKEN" ]]; then echo -e "${RED}令牌不能为空！${PLAIN}"; return; fi
 
-    read -p "4. 请输入后台面板端口 (直接回车表示不开启此功能，如 7500): " WEB_PORT
+    read -p "4. 是否强制开启 TLS 加密？(防DPI嗅探，推荐开启) [y/N]: " TLS_CHOICE
+    if [[ "$TLS_CHOICE" == "y" || "$TLS_CHOICE" == "Y" ]]; then
+        TLS_ENABLE="true"
+        TLS_TIPS=" ✅ 开启 (请务必在 OpenWrt 的【高级设置】中同步勾选开启 TLS)"
+    else
+        TLS_ENABLE="false"
+        TLS_TIPS=" ❌ 关闭"
+    fi
+
+    read -p "5. 请输入后台面板端口 (直接回车表示不开启此功能，如 7500): " WEB_PORT
     
     cat > "${CONFIG_BASE_DIR}/${INST_NAME}.toml" <<EOF
 bindPort = ${BIND_PORT}
 auth.method = "token"
 auth.token = "${TOKEN}"
+transport.tls.force = ${TLS_ENABLE}
 EOF
 
     if [[ -n "$WEB_PORT" ]]; then
@@ -124,13 +134,16 @@ EOF
     echo -e " 4. 令牌    : ${GREEN}${TOKEN}${PLAIN}"
     echo -e " 5. 用户名  : 留空即可，或填入 ${INST_NAME}"
     echo -e ""
-    echo -e "${YELLOW}[二、 服务列表（下半部分“添加”规则）]${PLAIN}"
+    echo -e "${YELLOW}[二、 高级设置（重要）]${PLAIN}"
+    echo -e " - TLS 加密 :${GREEN}${TLS_TIPS}${PLAIN}"
+    echo -e ""
+    echo -e "${YELLOW}[三、 服务列表（下半部分“添加”规则）]${PLAIN}"
     echo -e " 假设你要穿透路由器的网页后台："
     echo -e " - FRP 协议类型 : ${GREEN}tcp${PLAIN}"
     echo -e " - 远程端口     : ${GREEN}46080${PLAIN} (随便填一个未占用的可用端口)"
     echo -e " - 内网主机地址 : ${GREEN}192.168.5.1${PLAIN} (你路由器的局域网IP)"
     echo -e " - 内网主机端口 : ${GREEN}80${PLAIN}"
-    echo -e " - 开启数据加密 : ${GREEN}ON${PLAIN}"
+    echo -e " - 开启数据加密 : ${GREEN}ON${PLAIN} (此为传输内容加密，不同于底层 TLS)"
     echo -e " - 使用压缩     : ${GREEN}ON${PLAIN}"
     echo -e ""
     echo -e "👉 设置完成后，在外面浏览器输入 ${CYAN}http://${SERVER_IP}:46080${PLAIN} 即可回流回家！"
